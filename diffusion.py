@@ -24,8 +24,8 @@ class MDLMTrainConfig:
 
     batch_size: int = 16
     seq_len: int = 256
-    train_steps: int = 1000
-    log_every: int = 10
+    train_steps: int = 10000
+    log_every: int = 1000
     generate_tokens: int = 64
     generate_steps: int = 24
     generate_checkpoints: int = 4
