@@ -256,9 +256,12 @@ def train_mdlm(cfg: MDLMTrainConfig) -> None:
 
     token_ids, vocab = prepare_dataset(cfg)
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for this model because flash-attn kernels are used.")
-    device = torch.device("cuda")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     model = DIT(config=_build_model_config(cfg), vocab_size=len(vocab.id_to_token)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
