@@ -1,0 +1,5 @@
+torch
+flash-attn
+einops
+omegaconf
+huggingface_hub
