@@ -22,8 +22,8 @@ class MDLMTrainConfig:
     bpe_path: str = "data/bpe_merges.json"
     token_ids_path: str = "data/token_ids.json"
 
-    batch_size: int = 8
-    seq_len: int = 128
+    batch_size: int = 16
+    seq_len: int = 256
     train_steps: int = 1000
     log_every: int = 10
     generate_tokens: int = 64
@@ -31,7 +31,7 @@ class MDLMTrainConfig:
     generate_checkpoints: int = 4
     temperature: float = 1.0
 
-    lr: float = 3e-4
+    lr: float = 4e-4
     weight_decay: float = 0.01
     mask_schedule: str = "cosine"  # linear | cosine
 
