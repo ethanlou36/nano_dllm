@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Large local dataset sample generated from HF stream
+data/climbmix_400b_sample.txt
