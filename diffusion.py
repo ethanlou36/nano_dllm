@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Sequence, Tuple
 
@@ -12,7 +11,9 @@ import torch
 import torch.nn.functional as F
 
 from data_loader import Vocab, build_vocab, load_token_ids, save_token_ids
+from generation import generate_short_passage
 from model import DIT
+from noise_scheduler import apply_mask_with_scheduler
 
 
 @dataclass
@@ -104,45 +105,6 @@ def sample_batch_windows(
     return batch.to(device=device, dtype=torch.long)
 
 
-def scheduler_mask_prob(t: torch.Tensor, schedule: str) -> torch.Tensor:
-    if schedule == "linear":
-        return t
-    if schedule == "cosine":
-        return 1.0 - torch.cos(0.5 * math.pi * t)
-    raise ValueError(f"Unknown schedule '{schedule}'. Expected 'linear' or 'cosine'.")
-
-
-def apply_mask_with_scheduler(
-    clean_ids: torch.Tensor,
-    t: torch.Tensor,
-    mask_token_id: int,
-    special_token_ids: Sequence[int],
-    schedule: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    mask_prob = scheduler_mask_prob(t, schedule=schedule).unsqueeze(1).clamp(0.0, 1.0)
-    random_scores = torch.rand(clean_ids.shape, device=clean_ids.device)
-    loss_mask = random_scores < mask_prob
-
-    is_special = torch.zeros_like(clean_ids, dtype=torch.bool)
-    for token_id in special_token_ids:
-        is_special |= clean_ids.eq(token_id)
-    loss_mask &= ~is_special
-
-    # Ensure at least one masked token per row (if there is any non-special token).
-    candidate_positions = ~is_special
-    no_mask_rows = loss_mask.sum(dim=1).eq(0).nonzero(as_tuple=False).flatten()
-    for row_idx in no_mask_rows.tolist():
-        candidates = candidate_positions[row_idx].nonzero(as_tuple=False).flatten()
-        if candidates.numel() == 0:
-            continue
-        choice = candidates[torch.randint(0, candidates.numel(), (1,), device=clean_ids.device)]
-        loss_mask[row_idx, choice] = True
-
-    noisy_ids = clean_ids.clone()
-    noisy_ids[loss_mask] = mask_token_id
-    return noisy_ids, loss_mask
-
-
 def mdlm_train_step(
     model: DIT,
     optimizer: torch.optim.Optimizer,
@@ -193,87 +155,7 @@ def mdlm_train_step(
     }
 
 
-def decode_token_pieces(tokens: Sequence[str]) -> str:
-    if not tokens:
-        return ""
-    no_space_before = {".", ",", "!", "?", ";", ":", "'", "\"", ")", "]", "}"}
-    no_space_after = {"(", "[", "{", "\""}
-
-    out: list[str] = []
-    for token in tokens:
-        if not out:
-            out.append(token)
-            continue
-        prev = out[-1]
-        if token in no_space_before or prev in no_space_after:
-            out.append(token)
-        else:
-            out.append(" " + token)
-    return "".join(out)
-
-
-def render_generation_state(vocab: Vocab, token_ids: Sequence[int]) -> str:
-    visible_tokens: list[str] = []
-    for token_id in token_ids:
-        token = vocab.id_to_token[token_id]
-        if token in ("[BOS]", "[EOS]", "[PAD]"):
-            continue
-        visible_tokens.append(token)
-    return decode_token_pieces(visible_tokens)
-
-
-@torch.no_grad()
-def generate_short_passage(
-    model: DIT,
-    vocab: Vocab,
-    device: torch.device,
-    seq_len: int,
-    steps: int,
-    schedule: str,
-    temperature: float,
-    checkpoints: int,
-) -> str:
-    model.eval()
-    seq_len = max(seq_len, 4)
-    x = torch.full((1, seq_len), vocab.mask_id, dtype=torch.long, device=device)
-    x[:, 0] = vocab.bos_id
-    x[:, -1] = vocab.eos_id
-
-    maskable = (x != vocab.bos_id) & (x != vocab.eos_id) & (x != vocab.pad_id)
-    temp = max(temperature, 1e-5)
-    checkpoint_every = max(1, steps // max(checkpoints, 1))
-
-    print("\nGeneration Trace")
-    print("initial(masked)")
-    print(render_generation_state(vocab=vocab, token_ids=x[0].tolist()))
-
-    for step in range(steps, 0, -1):
-        t_value = step / float(steps)
-        t = torch.full((1,), t_value, dtype=torch.float32, device=device)
-        logits = model(x, sigma=t) / temp
-        sampled = torch.distributions.Categorical(logits=logits).sample()
-
-        masked_now = (x == vocab.mask_id) & maskable
-        x[masked_now] = sampled[masked_now]
-
-        if step > 1:
-            next_t = torch.tensor([(step - 1) / float(steps)], device=device)
-            next_mask_prob = scheduler_mask_prob(next_t, schedule=schedule).item()
-            remask = (torch.rand_like(x, dtype=torch.float32) < next_mask_prob) & maskable
-            x[remask] = vocab.mask_id
-
-        should_log = step == steps or step == 1 or step % checkpoint_every == 0
-        if should_log:
-            masked_count = int(((x == vocab.mask_id) & maskable).sum().item())
-            print(f"\ncheckpoint(step={step}/{steps}, masks_remaining={masked_count})")
-            print(render_generation_state(vocab=vocab, token_ids=x[0].tolist()))
-
-    token_ids = x[0].tolist()
-    pieces = vocab.decode(token_ids, skip_special=True)
-    return decode_token_pieces(pieces)
-
-
-def train_mdlm(cfg: MDLMTrainConfig) -> None:
+def train_mdlm(cfg: MDLMTrainConfig, save_model_path: str | None = None) -> None:
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
@@ -343,6 +225,33 @@ def train_mdlm(cfg: MDLMTrainConfig) -> None:
     )
     print("\nGenerated Passage")
     print(passage)
+
+    if save_model_path:
+        save_trained_model(
+            model=model,
+            cfg=cfg,
+            vocab=vocab,
+            save_path=save_model_path,
+        )
+
+
+def save_trained_model(
+    model: DIT,
+    cfg: MDLMTrainConfig,
+    vocab: Vocab,
+    save_path: str,
+) -> None:
+    checkpoint_path = Path(save_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "train_config": asdict(cfg),
+            "vocab_size": len(vocab.id_to_token),
+        },
+        checkpoint_path,
+    )
+    print(f"\nSaved model checkpoint to: {checkpoint_path}")
 
 
 if __name__ == "__main__":
