@@ -1,8 +1,7 @@
+import contextlib
 import math
 import typing
 
-import flash_attn
-import flash_attn.layers.rotary
 import huggingface_hub
 import omegaconf
 import torch
@@ -110,9 +109,16 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(qkv, cos, sin):
-  cos = cos[0,:,0,0,:cos.shape[-1]//2]
-  sin = sin[0,:,0,0,:sin.shape[-1]//2]
-  return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
+  # qkv: [B, S, 3, H, D], cos/sin: [1, S, 3, 1, D]
+  cos = cos[:, :, 0, :, :]
+  sin = sin[:, :, 0, :, :]
+
+  q = qkv[:, :, 0, :, :]
+  k = qkv[:, :, 1, :, :]
+  v = qkv[:, :, 2, :, :]
+  q = (q * cos) + (rotate_half(q) * sin)
+  k = (k * cos) + (rotate_half(k) * sin)
+  return torch.stack((q, k, v), dim=2)
 
 
 # function overload
@@ -129,8 +135,7 @@ class LayerNorm(nn.Module):
     self.weight = nn.Parameter(torch.ones([dim]))
     self.dim = dim
   def forward(self, x):
-    with torch.cuda.amp.autocast(enabled=False):
-      x = F.layer_norm(x.float(), [self.dim])
+    x = F.layer_norm(x.float(), [self.dim])
     return x * self.weight[None,None,:]
 
 
@@ -242,8 +247,6 @@ class DDiTBlock(nn.Module):
 
 
   def forward(self, x, rotary_cos_sin, c, seqlens=None):
-    batch_size, seq_len = x.shape[0], x.shape[1]
-
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
     (shift_msa, scale_msa, gate_msa, shift_mlp,
@@ -258,21 +261,20 @@ class DDiTBlock(nn.Module):
                     'b s (three h d) -> b s three h d',
                     three=3,
                     h=self.n_heads)
-    with torch.cuda.amp.autocast(enabled=False):
-      cos, sin = rotary_cos_sin
-      qkv = apply_rotary_pos_emb(
-        qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-    qkv = rearrange(qkv, 'b s ... -> (b s) ...')
-    if seqlens is None:
-      cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, step=seq_len,
-        dtype=torch.int32, device=qkv.device)
-    else:
-      cu_seqlens = seqlens.cumsum(-1)
-    x = flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
-      qkv, cu_seqlens, seq_len, 0., causal=False)
-    
-    x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+    cos, sin = rotary_cos_sin
+    qkv = apply_rotary_pos_emb(
+      qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+
+    q = qkv[:, :, 0, :, :].permute(0, 2, 1, 3)
+    k = qkv[:, :, 1, :, :].permute(0, 2, 1, 3)
+    v = qkv[:, :, 2, :, :].permute(0, 2, 1, 3)
+    x = F.scaled_dot_product_attention(
+      q, k, v,
+      attn_mask=None,
+      dropout_p=self.dropout if self.training else 0.0,
+      is_causal=False,
+    )
+    x = x.permute(0, 2, 1, 3).reshape(x.shape[0], x.shape[2], -1)
 
     x = bias_dropout_scale_fn(self.attn_out(x),
                               None,
@@ -362,7 +364,11 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     rotary_cos_sin = self.rotary_emb(x)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    autocast_ctx = (
+      torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+      if x.device.type == 'cuda' else contextlib.nullcontext()
+    )
+    with autocast_ctx:
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
       x = self.output_layer(x, c)
