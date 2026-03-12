@@ -28,6 +28,7 @@ class MDLMTrainConfig:
     log_every: int = 10
     generate_tokens: int = 64
     generate_steps: int = 24
+    generate_checkpoints: int = 4
     temperature: float = 1.0
 
     lr: float = 3e-4
@@ -211,6 +212,16 @@ def decode_token_pieces(tokens: Sequence[str]) -> str:
     return "".join(out)
 
 
+def render_generation_state(vocab: Vocab, token_ids: Sequence[int]) -> str:
+    visible_tokens: list[str] = []
+    for token_id in token_ids:
+        token = vocab.id_to_token[token_id]
+        if token in ("[BOS]", "[EOS]", "[PAD]"):
+            continue
+        visible_tokens.append(token)
+    return decode_token_pieces(visible_tokens)
+
+
 @torch.no_grad()
 def generate_short_passage(
     model: DIT,
@@ -220,6 +231,7 @@ def generate_short_passage(
     steps: int,
     schedule: str,
     temperature: float,
+    checkpoints: int,
 ) -> str:
     model.eval()
     seq_len = max(seq_len, 4)
@@ -229,6 +241,11 @@ def generate_short_passage(
 
     maskable = (x != vocab.bos_id) & (x != vocab.eos_id) & (x != vocab.pad_id)
     temp = max(temperature, 1e-5)
+    checkpoint_every = max(1, steps // max(checkpoints, 1))
+
+    print("\nGeneration Trace")
+    print("initial(masked)")
+    print(render_generation_state(vocab=vocab, token_ids=x[0].tolist()))
 
     for step in range(steps, 0, -1):
         t_value = step / float(steps)
@@ -244,6 +261,12 @@ def generate_short_passage(
             next_mask_prob = scheduler_mask_prob(next_t, schedule=schedule).item()
             remask = (torch.rand_like(x, dtype=torch.float32) < next_mask_prob) & maskable
             x[remask] = vocab.mask_id
+
+        should_log = step == steps or step == 1 or step % checkpoint_every == 0
+        if should_log:
+            masked_count = int(((x == vocab.mask_id) & maskable).sum().item())
+            print(f"\ncheckpoint(step={step}/{steps}, masks_remaining={masked_count})")
+            print(render_generation_state(vocab=vocab, token_ids=x[0].tolist()))
 
     token_ids = x[0].tolist()
     pieces = vocab.decode(token_ids, skip_special=True)
@@ -316,6 +339,7 @@ def train_mdlm(cfg: MDLMTrainConfig) -> None:
         steps=cfg.generate_steps,
         schedule=cfg.mask_schedule,
         temperature=cfg.temperature,
+        checkpoints=cfg.generate_checkpoints,
     )
     print("\nGenerated Passage")
     print(passage)
