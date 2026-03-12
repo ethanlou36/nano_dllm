@@ -10,7 +10,7 @@ from typing import Dict, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
-from data_loader import Vocab, build_vocab, load_token_ids, save_token_ids
+from data_loader import SPACE_TOKEN, Vocab, build_vocab, load_token_ids, save_token_ids
 from generation import generate_short_passage
 from model import DIT
 from noise_scheduler import apply_mask_with_scheduler
@@ -72,8 +72,10 @@ def prepare_dataset(cfg: MDLMTrainConfig) -> Tuple[torch.Tensor, Vocab]:
 
     if token_ids_path.exists() and vocab_path.exists() and bpe_path.exists():
         vocab = Vocab.load(vocab_path)
-        token_ids = json.loads(token_ids_path.read_text(encoding="utf-8"))
-        return torch.tensor(token_ids, dtype=torch.long), vocab
+        if SPACE_TOKEN in vocab.token_to_id:
+            token_ids = json.loads(token_ids_path.read_text(encoding="utf-8"))
+            return torch.tensor(token_ids, dtype=torch.long), vocab
+        print("Detected old tokenizer artifacts without whitespace markers; rebuilding vocab and token IDs...")
 
     vocab, bpe = build_vocab(
         text_path=text_path,

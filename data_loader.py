@@ -9,13 +9,34 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 SPECIAL_TOKENS = ("[PAD]", "[BOS]", "[EOS]", "[MASK]", "[UNK]")
 
+SPACE_TOKEN = "<SP>"
+NEWLINE_TOKEN = "<NL>"
+TAB_TOKEN = "<TAB>"
+CARRIAGE_RETURN_TOKEN = "<CR>"
 
-PRETOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", flags=re.UNICODE)
+_WHITESPACE_TO_TOKEN = {
+    " ": SPACE_TOKEN,
+    "\n": NEWLINE_TOKEN,
+    "\t": TAB_TOKEN,
+    "\r": CARRIAGE_RETURN_TOKEN,
+}
+_TOKEN_TO_WHITESPACE = {v: k for k, v in _WHITESPACE_TO_TOKEN.items()}
+WHITESPACE_MARKER_TOKENS = set(_TOKEN_TO_WHITESPACE.keys())
+
+
+PRETOKEN_PATTERN = re.compile(r"\s+|\w+|[^\w\s]", flags=re.UNICODE)
 
 
 def pretokenize(text: str) -> List[str]:
-    """Split into coarse tokens (words + punctuation) before BPE."""
-    return PRETOKEN_PATTERN.findall(text)
+    """Split into coarse tokens (including explicit whitespace markers) before BPE."""
+    out: List[str] = []
+    for token in PRETOKEN_PATTERN.findall(text):
+        if token.isspace():
+            for ch in token:
+                out.append(_WHITESPACE_TO_TOKEN.get(ch, SPACE_TOKEN))
+        else:
+            out.append(token)
+    return out
 
 
 def _count_pairs(word_freq: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
@@ -84,6 +105,8 @@ class BPEEncoder:
         return cls(merges=merges)
 
     def encode_token(self, token: str) -> List[str]:
+        if token in WHITESPACE_MARKER_TOKENS:
+            return [token]
         if token in self.cache:
             return list(self.cache[token])
 
@@ -186,6 +209,13 @@ class Vocab:
     def load(cls, path: str | Path) -> "Vocab":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls(token_to_id=payload["token_to_id"], id_to_token=payload["id_to_token"])
+
+
+def detokenize(tokens: Sequence[str]) -> str:
+    out: List[str] = []
+    for tok in tokens:
+        out.append(_TOKEN_TO_WHITESPACE.get(tok, tok))
+    return "".join(out)
 
 
 def save_token_ids(token_ids: Sequence[int], path: str | Path) -> None:

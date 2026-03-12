@@ -4,28 +4,13 @@ from typing import Sequence
 
 import torch
 
-from data_loader import Vocab
+from data_loader import Vocab, detokenize
 from model import DIT
 from noise_scheduler import scheduler_mask_prob
 
 
 def decode_token_pieces(tokens: Sequence[str]) -> str:
-    if not tokens:
-        return ""
-    no_space_before = {".", ",", "!", "?", ";", ":", "'", "\"", ")", "]", "}"}
-    no_space_after = {"(", "[", "{", "\""}
-
-    out: list[str] = []
-    for token in tokens:
-        if not out:
-            out.append(token)
-            continue
-        prev = out[-1]
-        if token in no_space_before or prev in no_space_after:
-            out.append(token)
-        else:
-            out.append(" " + token)
-    return "".join(out)
+    return detokenize(tokens)
 
 
 def render_generation_state(vocab: Vocab, token_ids: Sequence[int]) -> str:
