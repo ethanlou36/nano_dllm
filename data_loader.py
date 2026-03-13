@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -37,6 +38,34 @@ def pretokenize(text: str) -> List[str]:
         else:
             out.append(token)
     return out
+
+
+def _slugify_dataset_name(path: str | Path) -> str:
+    stem = Path(path).stem
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")
+    return slug or "dataset"
+
+
+@dataclass(frozen=True)
+class DatasetArtifactPaths:
+    vocab_path: Path
+    bpe_path: Path
+    token_ids_path: Path
+
+
+def get_dataset_artifact_paths(
+    text_path: str | Path,
+    artifacts_dir: str | Path | None = None,
+) -> DatasetArtifactPaths:
+    # Keep artifacts scoped by source text file to avoid cross-dataset collisions.
+    text_path = Path(text_path)
+    base_dir = Path(artifacts_dir) if artifacts_dir is not None else text_path.parent
+    slug = _slugify_dataset_name(text_path)
+    return DatasetArtifactPaths(
+        vocab_path=base_dir / f"{slug}_vocab.json",
+        bpe_path=base_dir / f"{slug}_bpe_merges.json",
+        token_ids_path=base_dir / f"{slug}_token_ids.json",
+    )
 
 
 def _count_pairs(word_freq: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
@@ -257,18 +286,32 @@ def load_token_ids(text_path: str | Path, vocab: Vocab, bpe: BPEEncoder) -> List
 
 
 if __name__ == "__main__":
-    # Build encoder artifacts and encode the full dataset.
-    text_file = Path("data/shakespeare.txt")
-    vocab_file = Path("data/vocab.json")
-    bpe_file = Path("data/bpe_merges.json")
-    token_ids_file = Path("data/token_ids.json")
+    parser = ArgumentParser(description="Build vocab/BPE/token_ids artifacts for a text dataset.")
+    parser.add_argument("--text-path", type=str, default="data/shakespeare.txt")
+    parser.add_argument("--artifacts-dir", type=str, default=None)
+    parser.add_argument("--vocab-path", type=str, default=None)
+    parser.add_argument("--bpe-path", type=str, default=None)
+    parser.add_argument("--token-ids-path", type=str, default=None)
+    parser.add_argument("--max-vocab-size", type=int, default=20000)
+    parser.add_argument("--num-merges", type=int, default=5000)
+    parser.add_argument("--min-pair-freq", type=int, default=2)
+    args = parser.parse_args()
+
+    text_file = Path(args.text_path)
+    auto_paths = get_dataset_artifact_paths(text_file, artifacts_dir=args.artifacts_dir)
+    vocab_file = Path(args.vocab_path) if args.vocab_path else auto_paths.vocab_path
+    bpe_file = Path(args.bpe_path) if args.bpe_path else auto_paths.bpe_path
+    token_ids_file = Path(args.token_ids_path) if args.token_ids_path else auto_paths.token_ids_path
+    vocab_file.parent.mkdir(parents=True, exist_ok=True)
+    bpe_file.parent.mkdir(parents=True, exist_ok=True)
+    token_ids_file.parent.mkdir(parents=True, exist_ok=True)
 
     vocab, bpe = build_vocab(
         text_file,
         min_freq=1,
-        max_vocab_size=20000,
-        num_merges=5000,
-        min_pair_freq=2,
+        max_vocab_size=args.max_vocab_size,
+        num_merges=args.num_merges,
+        min_pair_freq=args.min_pair_freq,
     )
     vocab.save(vocab_file)
     bpe.save(bpe_file)
@@ -280,4 +323,5 @@ if __name__ == "__main__":
     print("bpe_merges:", len(bpe.merges))
     print("mask_token:", "[MASK]", "id=", vocab.mask_id)
     print("num_token_ids:", len(token_ids))
+    print("text_path:", str(text_file))
     print("saved:", str(vocab_file), str(bpe_file), str(token_ids_file))
